@@ -1,0 +1,1070 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>パシャッと提出！朝のチェックボード</title>
+  
+  <!-- ライブラリの読み込み -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
+  <!-- Google Fonts: 北欧風の丸ゴシック -->
+  <link href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;700;800&display=swap" rel="stylesheet">
+  
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            app: {
+              cream: '#FAF9F6',
+              sage: '#7D9D9C',
+              sageDark: '#62807F',
+              terracotta: '#E07A5F',
+              terracottaDark: '#C9654B',
+              navy: '#2C3E50',
+              yellow: '#F4D03F',
+              blue: '#5DADE2'
+            }
+          },
+          fontFamily: {
+            sans: ['"M PLUS Rounded 1c"', 'sans-serif'],
+          },
+          animation: {
+            'fade-in': 'fadeIn 0.3s ease-out forwards',
+            'slide-up': 'slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+            'bounce-light': 'bounceLight 2s infinite',
+          },
+          keyframes: {
+            fadeIn: {
+              '0%': { opacity: '0' },
+              '100%': { opacity: '1' },
+            },
+            slideUp: {
+              '0%': { transform: 'translateY(20px)', opacity: '0' },
+              '100%': { transform: 'translateY(0)', opacity: '1' },
+            },
+            bounceLight: {
+              '0%, 100%': { transform: 'translateY(-5%)' },
+              '50%': { transform: 'translateY(0)' },
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      background-color: #FAF9F6;
+      color: #2C3E50;
+      -webkit-tap-highlight-color: transparent;
+    }
+    
+    /* カスタムスクロールバー */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #f1f1f1; 
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #c1c1c1; 
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #a8a8a8; 
+    }
+
+    /* カメラ枠のハック */
+    #reader {
+      border: none !important;
+      border-radius: 1rem;
+      overflow: hidden;
+    }
+    #reader video {
+      object-fit: cover;
+      border-radius: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, createContext, useContext, useCallback } = React;
+
+    // ==========================================
+    // 1. Utilities & Data
+    // ==========================================
+    
+    const DateUtils = {
+      getTodayStr: () => {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      },
+      getDayOfWeek: (dateStr = null) => {
+        const d = dateStr ? new Date(dateStr) : new Date();
+        return d.getDay(); // 0(Sun) - 6(Sat)
+      },
+      formatMMDD: (dateStr) => {
+        const d = new Date(dateStr);
+        return `${d.getMonth()+1}/${d.getDate()}`;
+      }
+    };
+
+    const TaskUtils = {
+      // 特定の児童が、指定した日に提出すべきタスクのリストを返す
+      getExpectedTasks: (studentId, tasks, submissions, dateStr) => {
+        const targetDate = dateStr || DateUtils.getTodayStr();
+        const targetDay = DateUtils.getDayOfWeek(targetDate);
+
+        return tasks.filter(t => {
+          // 1. スケジュール判定
+          let isScheduled = false;
+          if (t.schedule === 'weekly') {
+            isScheduled = t.days && t.days.includes(targetDay);
+          } else if (t.schedule === 'period') {
+            const afterStart = !t.startDate || targetDate >= t.startDate;
+            const beforeEnd = !t.endDate || targetDate <= t.endDate;
+            isScheduled = afterStart && beforeEnd;
+          } else {
+            isScheduled = t.active !== false; // 手動(デフォルト)
+          }
+          if (!isScheduled) return false;
+
+          // 2. 1回提出完了判定 (対象日より「前」または「同日」に既に提出しているか)
+          if (t.isOnce) {
+            // 対象日以前の履歴を探す
+            const hasSubmitted = submissions.some(
+              s => s.studentId === studentId && s.items && s.items[t.id] && s.date <= targetDate
+            );
+            // 今日表示すべきか？の判定で、すでに過去に提出済なら表示しない
+            // （ただし、履歴画面などで過去の日付を判定する際は、その日時点で提出済かどうかが重要）
+            // 実運用上、"isOnce" は「その日時点でまだ提出していない」場合に表示する。
+            const hasSubmittedBeforeTarget = submissions.some(
+              s => s.studentId === studentId && s.items && s.items[t.id] && s.date < targetDate
+            );
+            if (hasSubmittedBeforeTarget) return false;
+          }
+          return true;
+        });
+      }
+    };
+
+    // カスタムフック: LocalStorage
+    function useLocalStorage(key, initialValue) {
+      const [storedValue, setStoredValue] = useState(() => {
+        try {
+          const item = window.localStorage.getItem(key);
+          return item ? JSON.parse(item) : initialValue;
+        } catch (error) {
+          console.error(error);
+          return initialValue;
+        }
+      });
+
+      const setValue = (value) => {
+        try {
+          const valueToStore = value instanceof Function ? value(storedValue) : value;
+          setStoredValue(valueToStore);
+          window.localStorage.setItem(key, JSON.stringify(valueToStore));
+        } catch (error) {
+          console.error(error);
+        }
+      };
+      return [storedValue, setValue];
+    }
+
+    const INITIAL_STUDENTS = [
+      { id: '1', number: 1, name: 'あおき さくら', barcode: '1001' },
+      { id: '2', number: 2, name: 'いとう けんた', barcode: '1002' },
+      { id: '3', number: 3, name: 'うえたに ゆう', barcode: '1003' },
+    ];
+    const INITIAL_TASKS = [
+      { id: 't1', name: 'かんじドリル', type: 'homework', schedule: 'manual', active: true },
+      { id: 't2', name: 'けいさんドリル', type: 'homework', schedule: 'manual', active: true },
+      { id: 't3', name: 'おんどくカード', type: 'homework', schedule: 'manual', active: true },
+      { id: 't4', name: 'たいそうふく', type: 'belonging', schedule: 'manual', active: false },
+    ];
+
+    const HEALTH_OPTIONS = [
+      { id: 'good', label: 'げんき！', emoji: '😄', color: 'bg-app-sage', textColor: 'text-white' },
+      { id: 'normal', label: 'ふつう', emoji: '😐', color: 'bg-app-yellow', textColor: 'text-app-navy' },
+      { id: 'tired', label: 'つかれた', emoji: '😣', color: 'bg-app-terracotta', textColor: 'text-white' }
+    ];
+
+    // ==========================================
+    // 2. UI Components & Icons
+    // ==========================================
+    
+    const Icons = {
+      Camera: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>,
+      Settings: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+      Back: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>,
+      Check: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>,
+      Lock: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>,
+      Warning: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>,
+      Info: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+    };
+
+    // UI Context (Toast & Dialog)
+    const UIContext = createContext(null);
+
+    const UIProvider = ({ children }) => {
+      const [toast, setToast] = useState(null);
+      const [dialog, setDialog] = useState(null);
+
+      const showToast = useCallback((message, type = 'success') => {
+        setToast({ message, type });
+        setTimeout(() => setToast(null), 3000);
+      }, []);
+
+      const showConfirm = useCallback((title, message, onConfirm, confirmText = 'OK', isDanger = false) => {
+        setDialog({ title, message, onConfirm, confirmText, isDanger });
+      }, []);
+
+      const closeDialog = () => setDialog(null);
+
+      return (
+        <UIContext.Provider value={{ showToast, showConfirm }}>
+          {children}
+          
+          {/* Toast */}
+          {toast && (
+            <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50 animate-slide-up">
+              <div className={`px-6 py-3 rounded-full shadow-lg font-bold text-white flex items-center space-x-2 ${toast.type === 'error' ? 'bg-app-terracotta' : 'bg-app-sage'}`}>
+                {toast.type === 'error' ? <Icons.Warning /> : <Icons.Check />}
+                <span>{toast.message}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Confirm Dialog */}
+          {dialog && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black bg-opacity-40 backdrop-blur-sm animate-fade-in">
+              <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl animate-slide-up">
+                <h3 className="text-xl font-bold mb-2 text-app-navy">{dialog.title}</h3>
+                <p className="text-gray-600 mb-6 whitespace-pre-wrap leading-relaxed">{dialog.message}</p>
+                <div className="flex space-x-3">
+                  <button 
+                    onClick={closeDialog}
+                    className="flex-1 py-3 rounded-xl font-bold text-gray-500 bg-gray-100 hover:bg-gray-200 transition-colors"
+                  >
+                    キャンセル
+                  </button>
+                  <button 
+                    onClick={() => { dialog.onConfirm(); closeDialog(); }}
+                    className={`flex-1 py-3 rounded-xl font-bold text-white transition-colors ${dialog.isDanger ? 'bg-app-terracotta hover:bg-app-terracottaDark' : 'bg-app-sage hover:bg-app-sageDark'}`}
+                  >
+                    {dialog.confirmText}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </UIContext.Provider>
+      );
+    };
+
+    const useUI = () => useContext(UIContext);
+
+    // ==========================================
+    // 3. App Views
+    // ==========================================
+
+    // --- ホーム画面 ---
+    const HomeView = ({ onSelect }) => (
+      <div className="flex flex-col items-center justify-center min-h-screen p-6 space-y-10 animate-fade-in">
+        <div className="text-center space-y-4">
+          <div className="text-6xl animate-bounce-light drop-shadow-md">📸</div>
+          <h1 className="text-4xl font-extrabold text-app-navy tracking-tight">
+            朝のチェックボード
+          </h1>
+          <p className="text-gray-500 font-bold">きょうも いちにち がんばろう！</p>
+        </div>
+        
+        <div className="w-full max-w-sm space-y-5">
+          <button 
+            onClick={() => onSelect('student')}
+            className="w-full py-6 text-2xl font-bold text-white bg-app-sage rounded-3xl shadow-[0_8px_0_#62807F] hover:shadow-[0_4px_0_#62807F] hover:translate-y-1 active:shadow-none active:translate-y-2 transition-all flex items-center justify-center space-x-3"
+          >
+            <Icons.Camera />
+            <span>ていしゅつする</span>
+          </button>
+          
+          <button 
+            onClick={() => onSelect('teacher')}
+            className="w-full py-4 text-lg font-bold text-gray-600 bg-white border-2 border-gray-200 rounded-2xl hover:bg-gray-50 hover:border-gray-300 active:scale-95 transition-all flex items-center justify-center space-x-2"
+          >
+            <Icons.Settings />
+            <span>先生がめん</span>
+          </button>
+        </div>
+      </div>
+    );
+
+    // --- 児童：スキャン画面 ---
+    const StudentScanner = ({ students, onScan, onBack }) => {
+      const [manualMode, setManualMode] = useState(false);
+      const [manualInput, setManualInput] = useState('');
+      const { showToast } = useUI();
+      const scannerRef = useRef(null);
+
+      useEffect(() => {
+        if (manualMode) return;
+        const html5QrCode = new Html5Qrcode("reader");
+        scannerRef.current = html5QrCode;
+
+        html5QrCode.start(
+          { facingMode: "environment" },
+          { fps: 10, qrbox: { width: 250, height: 250 } },
+          (decodedText) => {
+            const student = students.find(s => s.barcode === decodedText);
+            if (student) {
+              onScan(student);
+            } else {
+              showToast('とうろくされていない カードです', 'error');
+            }
+          },
+          (err) => {} // ignore stream errors
+        ).catch((err) => {
+          console.warn("Camera init error:", err);
+          setManualMode(true);
+        });
+
+        return () => {
+          if (scannerRef.current?.isScanning) scannerRef.current.stop().catch(console.error);
+        };
+      }, [manualMode, students, onScan, showToast]);
+
+      const handleManualSubmit = (e) => {
+        e.preventDefault();
+        const student = students.find(s => s.number.toString() === manualInput);
+        if (student) {
+          onScan(student);
+        } else {
+          showToast('そのばんごうの じどうはいません', 'error');
+        }
+      };
+
+      return (
+        <div className="flex flex-col min-h-screen bg-app-cream animate-fade-in">
+          <header className="p-4 flex items-center bg-white shadow-sm sticky top-0 z-10">
+            <button onClick={onBack} className="p-2 text-app-navy bg-gray-100 rounded-full hover:bg-gray-200 transition-colors"><Icons.Back /></button>
+            <h2 className="text-xl font-bold text-app-navy ml-4">カードを かざしてね</h2>
+          </header>
+
+          <main className="flex-1 flex flex-col items-center justify-center p-6">
+            {!manualMode ? (
+              <div className="w-full max-w-sm flex flex-col items-center animate-slide-up">
+                <div className="relative w-full aspect-square bg-black rounded-[2rem] shadow-2xl border-8 border-white overflow-hidden mb-8">
+                   <div id="reader" className="absolute inset-0"></div>
+                   {/* スキャン枠のデザイン */}
+                   <div className="absolute inset-0 border-[40px] border-black/40 pointer-events-none"></div>
+                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                      <div className="w-48 h-48 border-4 border-app-sage/80 rounded-2xl relative">
+                        <div className="absolute top-0 left-0 w-4 h-4 border-t-4 border-l-4 border-white -translate-x-1 -translate-y-1"></div>
+                        <div className="absolute top-0 right-0 w-4 h-4 border-t-4 border-r-4 border-white translate-x-1 -translate-y-1"></div>
+                        <div className="absolute bottom-0 left-0 w-4 h-4 border-b-4 border-l-4 border-white -translate-x-1 translate-y-1"></div>
+                        <div className="absolute bottom-0 right-0 w-4 h-4 border-b-4 border-r-4 border-white translate-x-1 translate-y-1"></div>
+                      </div>
+                   </div>
+                </div>
+                <button onClick={() => setManualMode(true)} className="px-6 py-3 bg-white text-app-navy font-bold rounded-full shadow-sm hover:shadow-md transition-all active:scale-95">
+                  カメラが うごかないときは ここ
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleManualSubmit} className="w-full max-w-sm bg-white p-8 rounded-[2rem] shadow-xl text-center animate-slide-up">
+                <h3 className="text-2xl font-extrabold text-app-navy mb-8">しゅっせきばんごう</h3>
+                <input 
+                  type="number" 
+                  value={manualInput}
+                  onChange={(e) => setManualInput(e.target.value)}
+                  className="w-32 text-center text-5xl p-4 bg-app-cream border-4 border-app-sage rounded-2xl focus:outline-none focus:ring-4 focus:ring-app-sage/30 mb-8 font-mono"
+                  autoFocus
+                />
+                <button type="submit" className="w-full py-5 bg-app-sage text-white text-2xl font-bold rounded-2xl shadow-[0_6px_0_#62807F] active:shadow-none active:translate-y-[6px] transition-all">
+                  つぎへ
+                </button>
+                <button type="button" onClick={() => setManualMode(false)} className="mt-8 text-gray-400 font-bold underline hover:text-gray-600">
+                  カメラにもどる
+                </button>
+              </form>
+            )}
+          </main>
+        </div>
+      );
+    };
+
+    // --- 児童：提出フォーム ---
+    const SubmissionForm = ({ student, tasks, submissions, onSubmit, onCancel }) => {
+      const { showToast } = useUI();
+      const expectedTasks = TaskUtils.getExpectedTasks(student.id, tasks, submissions);
+      
+      const homeworkTasks = expectedTasks.filter(t => t.type === 'homework' || !t.type);
+      const belongingTasks = expectedTasks.filter(t => t.type === 'belonging');
+      const letterTasks = expectedTasks.filter(t => t.type === 'letter');
+      
+      const initialChecked = {};
+      expectedTasks.forEach(t => { initialChecked[t.id] = true; });
+      
+      const [checkedTasks, setCheckedTasks] = useState(initialChecked);
+      const [health, setHealth] = useState(null);
+      const [isSubmitting, setIsSubmitting] = useState(false);
+
+      const toggleTask = (taskId) => setCheckedTasks(prev => ({...prev, [taskId]: !prev[taskId]}));
+
+      const handleSubmit = () => {
+        if (!health) {
+          showToast('いまの きもち（たいちょう）を えらんでね！', 'error');
+          return;
+        }
+        setIsSubmitting(true);
+        onSubmit({ items: checkedTasks, health });
+      };
+
+      if (isSubmitting) {
+        return (
+          <div className="min-h-screen flex flex-col items-center justify-center bg-app-sage text-white animate-fade-in">
+            <div className="text-9xl mb-6 animate-bounce-light">💮</div>
+            <h2 className="text-4xl font-extrabold mb-4">よくできました！</h2>
+            <div className="px-6 py-3 bg-white/20 rounded-full backdrop-blur-sm">
+              <p className="text-xl font-bold">つぎのひと に かわってね</p>
+            </div>
+          </div>
+        );
+      }
+
+      const TaskSection = ({ title, icon, colorTheme, tasks, desc }) => {
+        if (tasks.length === 0) return null;
+        const themes = {
+          default: 'bg-app-cream',
+          blue: 'bg-app-blue/10 border-2 border-app-blue/20',
+          yellow: 'bg-app-yellow/10 border-2 border-app-yellow/20',
+        };
+        const checkBg = {
+          default: 'bg-app-sage', blue: 'bg-app-blue', yellow: 'bg-app-yellow'
+        };
+
+        return (
+          <section className={`p-6 rounded-[2rem] shadow-sm ${themes[colorTheme]}`}>
+            <h3 className="text-2xl font-bold text-center mb-2 flex items-center justify-center text-app-navy">
+              <span className="mr-2 text-3xl">{icon}</span> {title}
+            </h3>
+            <p className="text-center text-sm font-bold text-gray-500 mb-5">{desc}</p>
+            <div className="space-y-3">
+              {tasks.map(task => {
+                const isChecked = checkedTasks[task.id];
+                return (
+                  <button 
+                    key={task.id} onClick={() => toggleTask(task.id)}
+                    className={`w-full p-5 rounded-2xl flex items-center justify-between transition-all duration-200 border-2 active:scale-[0.98] ${isChecked ? 'bg-white border-transparent shadow-md' : 'bg-white/50 border-transparent opacity-50 grayscale'}`}
+                  >
+                    <span className="text-xl font-bold text-app-navy">{task.name}</span>
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white transition-colors ${isChecked ? checkBg[colorTheme] : 'bg-gray-300'}`}>
+                      {isChecked && <Icons.Check />}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        );
+      };
+
+      return (
+        <div className="min-h-screen bg-white animate-fade-in pb-32">
+          <header className="p-4 flex items-center justify-between bg-white sticky top-0 z-10 shadow-sm">
+            <button onClick={onCancel} className="px-4 py-2 font-bold text-gray-400 bg-gray-100 rounded-full hover:bg-gray-200">やめる</button>
+            <div className="text-center">
+              <h2 className="text-2xl font-extrabold text-app-navy">{student.name} <span className="text-lg text-gray-500">さん</span></h2>
+            </div>
+            <div className="w-20"></div>
+          </header>
+
+          <main className="p-6 max-w-md mx-auto space-y-6">
+            <TaskSection title="だすものは ある？" icon="🎒" colorTheme="default" tasks={homeworkTasks} desc="出さないものだけ タッチして はずしてね" />
+            <TaskSection title="とくべつな もちもの" icon="✨" colorTheme="blue" tasks={belongingTasks} desc="わすれたものだけ タッチして はずしてね" />
+            <TaskSection title="てがみ・しょるい" icon="✉️" colorTheme="yellow" tasks={letterTasks} desc="出さないものだけ タッチして はずしてね" />
+
+            <section className="bg-white border-4 border-app-cream p-6 rounded-[2rem] shadow-sm">
+              <h3 className="text-2xl font-bold text-center mb-6 flex items-center justify-center text-app-navy">
+                <span className="mr-2 text-3xl">🌡️</span> いまの きもちは？
+              </h3>
+              <div className="flex justify-between gap-3">
+                {HEALTH_OPTIONS.map(opt => {
+                  const isSelected = health === opt.id;
+                  return (
+                    <button
+                      key={opt.id} onClick={() => setHealth(opt.id)}
+                      className={`flex-1 flex flex-col items-center py-4 rounded-2xl transition-all duration-200 active:scale-95 ${isSelected ? `${opt.color} ${opt.textColor} shadow-[0_4px_0_rgba(0,0,0,0.1)] -translate-y-1` : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
+                    >
+                      <span className="text-4xl mb-2 filter drop-shadow-sm">{opt.emoji}</span>
+                      <span className="font-extrabold text-sm">{opt.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          </main>
+
+          <div className="fixed bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-white via-white to-transparent pointer-events-none">
+            <div className="max-w-md mx-auto pointer-events-auto">
+              <button 
+                onClick={handleSubmit}
+                className="w-full py-5 bg-app-terracotta text-white text-2xl font-extrabold rounded-full shadow-[0_8px_0_#C9654B] active:shadow-none active:translate-y-[8px] transition-all"
+              >
+                ていしゅつする！
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // --- 先生：ダッシュボード サブコンポーネント ---
+
+    const TodayTab = ({ students, tasks, submissions, setSubmissions }) => {
+      const { showConfirm } = useUI();
+      const todayStr = DateUtils.getTodayStr();
+      const todaySubmissions = submissions.filter(s => s.date === todayStr);
+
+      const handleReset = () => {
+        showConfirm(
+          '今日のデータをリセット',
+          '本日分の提出データをすべて消去します。よろしいですか？',
+          () => setSubmissions(submissions.filter(s => s.date !== todayStr)),
+          'リセットする',
+          true
+        );
+      };
+
+      const getHealthEmoji = (id) => HEALTH_OPTIONS.find(o => o.id === id)?.emoji || '❓';
+
+      return (
+        <div className="space-y-6 animate-fade-in">
+          <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+            <div>
+              <h3 className="text-sm font-bold text-gray-500 mb-1">きょうの提出率</h3>
+              <p className="text-4xl font-extrabold text-app-sage">{todaySubmissions.length} <span className="text-xl text-gray-400">/ {students.length}人</span></p>
+            </div>
+            <button onClick={handleReset} className="px-5 py-2.5 bg-gray-100 text-gray-600 text-sm font-bold rounded-xl hover:bg-gray-200 transition-colors">
+              リセット
+            </button>
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left whitespace-nowrap">
+                <thead className="bg-app-cream text-app-navy text-sm border-b-2 border-gray-100">
+                  <tr>
+                    <th className="p-4 w-16 text-center">番号</th>
+                    <th className="p-4 min-w-[10rem]">名前</th>
+                    <th className="p-4 text-center w-24">体調</th>
+                    <th className="p-4">提出状況 <span className="text-xs font-normal text-gray-500 ml-2">🟩済 / 🟥未</span></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {students.sort((a,b)=>a.number - b.number).map(student => {
+                    const sub = todaySubmissions.find(s => s.studentId === student.id);
+                    const expectedTasks = TaskUtils.getExpectedTasks(student.id, tasks, submissions, todayStr);
+                    const isAllSubmitted = expectedTasks.length === 0 || (sub && expectedTasks.every(t => sub.items && sub.items[t.id]));
+
+                    return (
+                      <tr key={student.id} className={`transition-colors hover:bg-gray-50 ${isAllSubmitted ? '' : 'bg-red-50/30'}`}>
+                        <td className="p-4 text-center text-gray-400 font-mono">{student.number}</td>
+                        <td className="p-4 font-bold text-app-navy">{student.name}</td>
+                        <td className="p-4 text-2xl text-center">
+                          {sub ? <span className={sub.health === 'tired' ? 'animate-pulse inline-block' : ''}>{getHealthEmoji(sub.health)}</span> : <span className="text-gray-300">-</span>}
+                        </td>
+                        <td className="p-4">
+                          <div className="flex flex-wrap gap-2">
+                            {expectedTasks.length === 0 && <span className="text-xs font-bold text-gray-300 bg-gray-100 px-2 py-1 rounded">項目なし</span>}
+                            {expectedTasks.map(task => {
+                              const isSubmitted = sub?.items?.[task.id];
+                              return (
+                                <span key={task.id} className={`inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold text-white shadow-sm ${isSubmitted ? 'bg-app-sage' : 'bg-app-terracotta'}`}>
+                                  {task.name}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const HistoryTab = ({ students, tasks, submissions }) => {
+      const availableMonths = Array.from(new Set(submissions.map(s => s.date.substring(0, 7)))).sort().reverse();
+      const [selectedMonth, setSelectedMonth] = useState(availableMonths.length > 0 ? availableMonths[0] : DateUtils.getTodayStr().substring(0, 7));
+      const [selectedStudentId, setSelectedStudentId] = useState('all');
+
+      const monthSubmissions = submissions.filter(s => s.date.startsWith(selectedMonth));
+      const datesInMonth = Array.from(new Set(monthSubmissions.map(s => s.date))).sort();
+      const filteredStudents = selectedStudentId === 'all' ? students.sort((a,b)=>a.number - b.number) : students.filter(s => s.id === selectedStudentId);
+
+      return (
+        <div className="space-y-6 animate-fade-in">
+          <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <h3 className="font-bold text-app-navy flex items-center"><Icons.Info /><span className="ml-2">提出状況一覧</span></h3>
+            <div className="flex gap-3 w-full sm:w-auto">
+              <select value={selectedStudentId} onChange={e => setSelectedStudentId(e.target.value)} className="flex-1 border-2 border-gray-200 p-2.5 rounded-xl font-bold text-app-navy outline-none focus:border-app-sage bg-gray-50">
+                <option value="all">全員を表示</option>
+                {students.sort((a,b)=>a.number - b.number).map(s => <option key={s.id} value={s.id}>{s.number}. {s.name}</option>)}
+              </select>
+              <select value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} className="flex-1 border-2 border-gray-200 p-2.5 rounded-xl font-bold text-app-navy outline-none focus:border-app-sage bg-gray-50">
+                {availableMonths.length === 0 && <option value={selectedMonth}>{selectedMonth.replace('-','年')}月</option>}
+                {availableMonths.map(m => <option key={m} value={m}>{m.replace('-', '年')}月</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div className="bg-white p-1 rounded-2xl shadow-sm border border-gray-100">
+            <div className="p-4 text-sm flex flex-wrap gap-4 bg-app-cream rounded-t-xl border-b border-gray-100">
+               <span className="font-bold text-app-navy">項目の略称：</span>
+               {tasks.map(t => <span key={t.id} className="text-gray-600">[{t.name.charAt(0)}] {t.name}</span>)}
+            </div>
+
+            <div className="overflow-x-auto relative max-h-[65vh] rounded-b-xl">
+              <table className="min-w-full text-sm border-collapse text-center whitespace-nowrap">
+                <thead className="bg-gray-50 sticky top-0 z-20 shadow-sm">
+                  <tr>
+                    <th className="border-b border-gray-200 p-4 sticky left-0 bg-gray-50 z-30 w-40 text-left text-app-navy shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">名前</th>
+                    {datesInMonth.length === 0 ? <th className="border-b border-gray-200 p-4 text-gray-400">データなし</th> : datesInMonth.map(date => <th key={date} className="border-b border-gray-200 p-3 min-w-[5rem] text-gray-600">{DateUtils.formatMMDD(date)}</th>)}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {datesInMonth.length === 0 ? (
+                    <tr><td colSpan="2" className="p-10 text-gray-400 font-bold">この月の提出記録はありません</td></tr>
+                  ) : (
+                    filteredStudents.map(student => (
+                      <tr key={student.id} className="hover:bg-gray-50 transition-colors">
+                        <td className="p-4 sticky left-0 bg-white z-10 font-bold text-left text-app-navy shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">
+                          <span className="text-gray-400 font-mono mr-2">{student.number}.</span>{student.name}
+                        </td>
+                        {datesInMonth.map(date => {
+                          const sub = monthSubmissions.find(s => s.studentId === student.id && s.date === date);
+                          if (!sub) return <td key={date} className="p-3 bg-white text-gray-200">-</td>;
+                          
+                          const tasksOnDate = Array.from(new Set(monthSubmissions.filter(s => s.date === date).flatMap(s => Object.keys(s.items || {}))));
+                          return (
+                            <td key={date} className="p-3 bg-white">
+                              <div className="flex flex-wrap gap-1 justify-center">
+                                {tasksOnDate.map(tId => {
+                                  const taskObj = tasks.find(t => t.id === tId);
+                                  const isSubmitted = sub.items?.[tId];
+                                  return (
+                                    <span key={tId} title={taskObj?.name} className={`w-6 h-6 rounded flex items-center justify-center text-xs font-bold text-white shadow-sm ${isSubmitted ? 'bg-app-sage' : 'bg-app-terracotta'}`}>
+                                      {taskObj ? taskObj.name.charAt(0) : '?'}
+                                    </span>
+                                  )
+                                })}
+                              </div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const TasksTab = ({ tasks, setTasks }) => {
+      const { showConfirm, showToast } = useUI();
+      const [form, setForm] = useState({ name: '', type: 'homework', schedule: 'manual', days: [1,2,3,4,5], startDate: '', endDate: '', isOnce: false });
+
+      const handleAdd = (e) => {
+        e.preventDefault();
+        if(!form.name.trim()) return showToast('名前を入力してください', 'error');
+        const newTask = { id: 't' + Date.now(), ...form, active: true };
+        if(form.schedule !== 'weekly') newTask.days = [];
+        if(form.schedule !== 'period') { newTask.startDate = null; newTask.endDate = null; }
+        
+        setTasks([...tasks, newTask]);
+        setForm({ name: '', type: 'homework', schedule: 'manual', days: [1,2,3,4,5], startDate: '', endDate: '', isOnce: false });
+        showToast('項目を追加しました');
+      };
+
+      const toggleTask = (id) => setTasks(tasks.map(t => t.id === id ? { ...t, active: !t.active } : t));
+      
+      const handleDelete = (id) => {
+        showConfirm('項目の削除', 'この項目を削除します。よろしいですか？', () => {
+          setTasks(tasks.filter(t => t.id !== id));
+          showToast('削除しました');
+        }, '削除する', true);
+      };
+
+      const TypeBadge = ({ type }) => {
+        const styles = { homework: 'bg-orange-100 text-app-terracotta', belonging: 'bg-blue-100 text-app-blue', letter: 'bg-yellow-100 text-yellow-700' };
+        const labels = { homework: '宿題', belonging: '持物', letter: '書類' };
+        return <span className={`text-xs px-2.5 py-1 rounded-md font-bold ${styles[type]}`}>{labels[type]}</span>;
+      };
+
+      return (
+        <div className="space-y-8 animate-fade-in">
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+            <h3 className="font-bold text-app-navy mb-4">設定済みのチェック項目</h3>
+            <div className="space-y-3">
+              {tasks.length === 0 && <p className="text-gray-400 text-sm">項目がありません</p>}
+              {tasks.map(t => (
+                <div key={t.id} className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-100 gap-4">
+                  <div className="flex items-start space-x-3">
+                    <TypeBadge type={t.type} />
+                    <div>
+                      <div className={`font-bold text-app-navy ${t.schedule === 'manual' && t.active === false ? 'text-gray-400 line-through' : ''}`}>{t.name}</div>
+                      <div className="flex flex-wrap items-center gap-2 mt-2 text-xs font-bold text-gray-500">
+                        {t.schedule === 'weekly' ? <span className="bg-white border border-gray-200 px-2 py-1 rounded text-app-sage">📅 {['日','月','火','水','木','金','土'].filter((_,i)=>t.days?.includes(i)).join('・')}</span> 
+                        : t.schedule === 'period' ? <span className="bg-white border border-gray-200 px-2 py-1 rounded text-app-sage">📅 {t.startDate?.replace(/-/g,'/')||'未定'}〜{t.endDate?.replace(/-/g,'/')||'未定'}</span> 
+                        : <span className="bg-white border border-gray-200 px-2 py-1 rounded">✋ 手動</span>}
+                        {t.isOnce && <span className="text-app-terracotta bg-red-50 px-2 py-1 rounded border border-red-100">※1回で完了</span>}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center space-x-3 shrink-0">
+                    {t.schedule === 'manual' ? (
+                      <button onClick={() => toggleTask(t.id)} className={`px-5 py-2 rounded-xl text-sm font-bold text-white transition-all active:scale-95 ${t.active !== false ? 'bg-app-sage shadow-md' : 'bg-gray-300'}`}>
+                        {t.active !== false ? '表示ON' : '非表示'}
+                      </button>
+                    ) : <span className="px-4 text-sm font-bold text-gray-400">自動制御</span>}
+                    <button onClick={() => handleDelete(t.id)} className="p-2 text-gray-400 hover:text-app-terracotta hover:bg-red-50 rounded-lg transition-colors"><svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <form onSubmit={handleAdd} className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 space-y-5">
+            <h3 className="font-bold text-app-navy flex items-center"><span className="text-xl mr-2">➕</span> 新しい項目を追加</h3>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <select value={form.type} onChange={e => setForm({...form, type: e.target.value, isOnce: e.target.value === 'letter' ? true : form.isOnce})} className="border-2 border-gray-200 p-3 rounded-xl font-bold text-app-navy outline-none focus:border-app-sage bg-gray-50">
+                <option value="homework">宿題</option>
+                <option value="belonging">特別な持ち物</option>
+                <option value="letter">手紙・書類</option>
+              </select>
+              <input type="text" value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="項目の名前" className="flex-1 border-2 border-gray-200 p-3 rounded-xl focus:border-app-sage outline-none font-bold text-app-navy" />
+            </div>
+            
+            <div className="p-5 bg-app-cream rounded-xl border border-gray-200 space-y-4">
+              <div>
+                <label className="font-bold text-sm text-gray-500 block mb-2">いつ表示しますか？</label>
+                <div className="flex flex-wrap gap-2">
+                  {['manual', 'weekly', 'period'].map(v => (
+                    <label key={v} className={`px-4 py-2 rounded-lg font-bold text-sm cursor-pointer transition-colors border-2 ${form.schedule === v ? 'bg-white border-app-sage text-app-sage' : 'border-transparent text-gray-500 hover:bg-gray-100'}`}>
+                      <input type="radio" name="schedule" value={v} checked={form.schedule === v} onChange={e => setForm({...form, schedule: e.target.value})} className="hidden" />
+                      {v === 'manual' ? '手動でON/OFF' : v === 'weekly' ? '曜日で指定' : '期間で指定'}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              
+              {form.schedule === 'weekly' && (
+                <div className="animate-fade-in pt-2">
+                  <div className="flex flex-wrap gap-2">
+                    {[{d:1,l:'月'},{d:2,l:'火'},{d:3,l:'水'},{d:4,l:'木'},{d:5,l:'金'}].map(day => (
+                      <label key={day.d} className={`px-4 py-2 rounded-lg font-bold text-sm cursor-pointer transition-colors border-2 ${form.days.includes(day.d) ? 'bg-app-sage border-app-sage text-white' : 'bg-white border-gray-200 text-gray-500'}`}>
+                        <input type="checkbox" checked={form.days.includes(day.d)} onChange={e => {
+                          const newDays = e.target.checked ? [...form.days, day.d] : form.days.filter(d => d !== day.d);
+                          setForm({...form, days: newDays});
+                        }} className="hidden"/> {day.l}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {form.schedule === 'period' && (
+                <div className="flex items-center space-x-3 pt-2 animate-fade-in">
+                  <input type="date" value={form.startDate} onChange={e => setForm({...form, startDate: e.target.value})} className="border-2 border-gray-200 p-2.5 rounded-xl text-sm outline-none focus:border-app-sage font-bold text-app-navy" />
+                  <span className="text-gray-400 font-bold">〜</span>
+                  <input type="date" value={form.endDate} onChange={e => setForm({...form, endDate: e.target.value})} className="border-2 border-gray-200 p-2.5 rounded-xl text-sm outline-none focus:border-app-sage font-bold text-app-navy" />
+                </div>
+              )}
+
+              <div className="pt-2 border-t border-gray-200">
+                <label className="flex items-center space-x-3 cursor-pointer group">
+                  <div className={`w-6 h-6 rounded-md border-2 flex items-center justify-center transition-colors ${form.isOnce ? 'bg-app-sage border-app-sage text-white' : 'border-gray-300 group-hover:border-app-sage'}`}>
+                    {form.isOnce && <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>}
+                  </div>
+                  <input type="checkbox" checked={form.isOnce} onChange={e => setForm({...form, isOnce: e.target.checked})} className="hidden" />
+                  <span className="font-bold text-app-navy">1回提出したら表示を消す</span>
+                </label>
+              </div>
+            </div>
+            
+            <button type="submit" className="w-full sm:w-auto bg-app-navy text-white px-8 py-3.5 rounded-xl font-bold shadow-md hover:bg-opacity-90 active:scale-95 transition-all">
+              この設定で追加する
+            </button>
+          </form>
+        </div>
+      );
+    };
+
+    const StudentsTab = ({ students, setStudents }) => {
+      const { showConfirm, showToast } = useUI();
+      const [form, setForm] = useState({ number: '', name: '' });
+      
+      const handleAdd = (e) => {
+        e.preventDefault();
+        if(!form.name.trim() || !form.number) return showToast('番号と名前を入力してください', 'error');
+        const newStudent = { id: 's' + Date.now(), number: parseInt(form.number), name: form.name, barcode: '1' + String(form.number).padStart(3, '0') };
+        setStudents([...students, newStudent].sort((a,b) => a.number - b.number));
+        setForm({ number: '', name: '' });
+        showToast('名簿に追加しました');
+      };
+      
+      const handleDelete = (id) => {
+        showConfirm('児童の削除', 'この児童を名簿から削除しますか？\n（提出記録も参照できなくなります）', () => {
+          setStudents(students.filter(s => s.id !== id));
+          showToast('削除しました');
+        }, '削除する', true);
+      };
+
+      return (
+        <div className="space-y-6 animate-fade-in">
+          <form onSubmit={handleAdd} className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col sm:flex-row gap-3 items-end">
+            <div className="w-full sm:w-24">
+              <label className="block text-xs font-bold text-gray-500 mb-1">出席番号</label>
+              <input type="number" value={form.number} onChange={e=>setForm({...form, number: e.target.value})} className="w-full border-2 border-gray-200 p-3 rounded-xl focus:border-app-sage outline-none font-bold text-app-navy" />
+            </div>
+            <div className="w-full flex-1">
+              <label className="block text-xs font-bold text-gray-500 mb-1">名前</label>
+              <input type="text" value={form.name} onChange={e=>setForm({...form, name: e.target.value})} placeholder="例: 山田 たろう" className="w-full border-2 border-gray-200 p-3 rounded-xl focus:border-app-sage outline-none font-bold text-app-navy" />
+            </div>
+            <button type="submit" className="w-full sm:w-auto bg-app-sage text-white px-8 py-3.5 rounded-xl font-bold shadow-md hover:bg-app-sageDark active:scale-95 transition-all">追加</button>
+          </form>
+
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <table className="w-full text-left">
+              <thead className="bg-app-cream text-app-navy text-sm border-b-2 border-gray-100">
+                <tr><th className="p-4 w-20">番号</th><th className="p-4">名前</th><th className="p-4 text-xs">バーコード値</th><th className="p-4"></th></tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {students.map(s => (
+                  <tr key={s.id} className="hover:bg-gray-50 transition-colors">
+                    <td className="p-4 text-gray-400 font-mono">{s.number}</td>
+                    <td className="p-4 font-bold text-app-navy">{s.name}</td>
+                    <td className="p-4 font-mono text-gray-400 text-sm">{s.barcode}</td>
+                    <td className="p-4 text-right">
+                      <button onClick={() => handleDelete(s.id)} className="text-gray-400 hover:text-app-terracotta p-2 rounded-lg hover:bg-red-50 transition-colors">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    };
+
+    const SettingsTab = ({ password, setPassword, onResetAll }) => {
+      const { showToast, showConfirm } = useUI();
+      const [form, setForm] = useState({ current: '', new: '', confirm: '' });
+
+      const handleChangePassword = (e) => {
+        e.preventDefault();
+        if (form.current !== password) return showToast('現在のパスワードが違います', 'error');
+        if (form.new !== form.confirm) return showToast('新しいパスワードが一致しません', 'error');
+        if (!form.new.trim()) return showToast('新しいパスワードを入力してください', 'error');
+        
+        setPassword(form.new);
+        showToast('パスワードを変更しました');
+        setForm({ current: '', new: '', confirm: '' });
+      };
+
+      return (
+        <div className="space-y-8 animate-fade-in max-w-2xl">
+          <div className="bg-white p-8 rounded-[2rem] shadow-sm border border-gray-100">
+            <h3 className="font-extrabold text-xl mb-6 flex items-center text-app-navy"><Icons.Lock /><span className="ml-2">パスワードの変更</span></h3>
+            <form onSubmit={handleChangePassword} className="space-y-5">
+              <div>
+                <label className="block text-sm font-bold text-gray-500 mb-2">現在のパスワード</label>
+                <input type="password" value={form.current} onChange={e=>setForm({...form, current: e.target.value})} className="w-full border-2 border-gray-200 p-3 rounded-xl outline-none focus:border-app-sage font-mono" />
+              </div>
+              <div className="pt-4 border-t border-gray-100">
+                <label className="block text-sm font-bold text-gray-500 mb-2">新しいパスワード</label>
+                <input type="password" value={form.new} onChange={e=>setForm({...form, new: e.target.value})} className="w-full border-2 border-gray-200 p-3 rounded-xl outline-none focus:border-app-sage font-mono" />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-gray-500 mb-2">新しいパスワード（確認）</label>
+                <input type="password" value={form.confirm} onChange={e=>setForm({...form, confirm: e.target.value})} className="w-full border-2 border-gray-200 p-3 rounded-xl outline-none focus:border-app-sage font-mono" />
+              </div>
+              <button type="submit" className="bg-app-sage text-white font-bold px-8 py-3.5 rounded-xl shadow-md hover:bg-app-sageDark active:scale-95 transition-all">変更する</button>
+            </form>
+          </div>
+
+          <div className="bg-red-50 p-8 rounded-[2rem] shadow-sm border border-red-100">
+            <h3 className="font-extrabold text-xl text-app-terracotta mb-3">年度更新（全データリセット）</h3>
+            <p className="text-sm font-bold text-gray-600 mb-6 leading-relaxed">
+              名簿、設定された項目、すべての提出記録を完全に消去し、初期状態に戻します。<br/>
+              ※パスワードも初期値（<code className="bg-white px-1 rounded text-app-terracotta">admin</code>）にリセットされます。
+            </p>
+            <button 
+              onClick={() => showConfirm(
+                '全データの初期化',
+                '【警告】この操作は取り消せません。\n名簿、設定、記録をすべて削除してよろしいですか？',
+                onResetAll,
+                'リセットを実行',
+                true
+              )}
+              className="bg-app-terracotta text-white font-bold px-8 py-3.5 rounded-xl shadow-md hover:bg-app-terracottaDark active:scale-95 transition-all"
+            >
+              すべてのデータをリセットする
+            </button>
+          </div>
+        </div>
+      );
+    };
+
+    // --- 先生：ダッシュボード メイン ---
+    const TeacherDashboard = ({ students, tasks, submissions, password, setTasks, setStudents, setSubmissions, setPassword, onResetAll, onBack }) => {
+      const { showToast } = useUI();
+      const [isAuthenticated, setIsAuthenticated] = useState(false);
+      const [inputPassword, setInputPassword] = useState('');
+      const [activeTab, setActiveTab] = useState('today');
+      
+      const handleLogin = (e) => {
+        e.preventDefault();
+        if (inputPassword === password) setIsAuthenticated(true);
+        else { showToast('パスワードが違います', 'error'); setInputPassword(''); }
+      };
+
+      if (!isAuthenticated) {
+        return (
+          <div className="min-h-screen bg-app-cream flex flex-col items-center justify-center p-6 animate-fade-in">
+            <div className="bg-white p-10 rounded-[2rem] shadow-xl w-full max-w-md animate-slide-up border border-gray-100">
+              <div className="flex justify-center mb-6 text-app-sage"><Icons.Settings /></div>
+              <h2 className="text-2xl font-extrabold text-center text-app-navy mb-8">先生がめんにログイン</h2>
+              <form onSubmit={handleLogin} className="space-y-6">
+                <div>
+                  <input type="password" value={inputPassword} onChange={(e) => setInputPassword(e.target.value)} className="w-full border-2 border-gray-200 p-4 rounded-2xl focus:border-app-sage outline-none font-mono text-center text-xl tracking-widest" placeholder="Password" autoFocus />
+                </div>
+                <button type="submit" className="w-full bg-app-navy text-white font-bold py-4 rounded-2xl shadow-[0_6px_0_#1a252f] active:shadow-none active:translate-y-[6px] transition-all">
+                  入室する
+                </button>
+              </form>
+              <button onClick={onBack} className="w-full mt-8 text-gray-400 font-bold py-2 hover:text-gray-600 transition-colors">もどる</button>
+            </div>
+          </div>
+        );
+      }
+
+      const tabs = [
+        { id:'today', label:'きょうの状況' }, { id:'history', label:'提出状況一覧' },
+        { id:'tasks', label:'提出物設定' }, { id:'students', label:'名簿設定' }, { id:'settings', label:'設定・管理' }
+      ];
+
+      return (
+        <div className="min-h-screen bg-app-cream pb-20 animate-fade-in">
+          <header className="bg-white p-4 flex items-center justify-between shadow-sm sticky top-0 z-30">
+            <div className="flex items-center">
+              <button onClick={onBack} className="p-2 mr-3 text-app-navy bg-gray-100 rounded-full hover:bg-gray-200 transition-colors"><Icons.Back /></button>
+              <h2 className="text-xl font-extrabold text-app-navy">先生がめん</h2>
+            </div>
+          </header>
+          
+          <nav className="bg-white border-b border-gray-200 sticky top-[72px] z-20 shadow-sm">
+            <div className="flex overflow-x-auto max-w-5xl mx-auto px-4 hide-scrollbar">
+              {tabs.map(tab => (
+                <button 
+                  key={tab.id} onClick={() => setActiveTab(tab.id)}
+                  className={`py-4 px-6 text-sm font-bold border-b-4 transition-all whitespace-nowrap ${activeTab === tab.id ? 'border-app-sage text-app-sage' : 'border-transparent text-gray-400 hover:text-gray-600'}`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </nav>
+
+          <main className="p-6 max-w-5xl mx-auto mt-4">
+            {activeTab === 'today' && <TodayTab students={students} tasks={tasks} submissions={submissions} setSubmissions={setSubmissions} />}
+            {activeTab === 'history' && <HistoryTab students={students} tasks={tasks} submissions={submissions} />}
+            {activeTab === 'tasks' && <TasksTab tasks={tasks} setTasks={setTasks} />}
+            {activeTab === 'students' && <StudentsTab students={students} setStudents={setStudents} />}
+            {activeTab === 'settings' && <SettingsTab password={password} setPassword={setPassword} onResetAll={onResetAll} />}
+          </main>
+        </div>
+      );
+    };
+
+    // ==========================================
+    // 4. Main App Component
+    // ==========================================
+    
+    const AppContent = () => {
+      const [view, setView] = useState('home'); // home, student, teacher
+      const [selectedStudent, setSelectedStudent] = useState(null);
+      const { showToast } = useUI();
+      
+      const [students, setStudents] = useLocalStorage('board_students', INITIAL_STUDENTS);
+      const [tasks, setTasks] = useLocalStorage('board_tasks', INITIAL_TASKS);
+      const [submissions, setSubmissions] = useLocalStorage('board_submissions', []);
+      const [password, setPassword] = useLocalStorage('board_password', 'admin');
+
+      const handleSubmission = (data) => {
+        const newSubmission = {
+          id: 'sub_' + Date.now(),
+          studentId: selectedStudent.id,
+          date: DateUtils.getTodayStr(),
+          timestamp: new Date().toISOString(),
+          items: data.items,
+          health: data.health
+        };
+        setSubmissions(prev => {
+          const filtered = prev.filter(s => !(s.studentId === selectedStudent.id && s.date === DateUtils.getTodayStr()));
+          return [...filtered, newSubmission];
+        });
+        setTimeout(() => setSelectedStudent(null), 3000);
+      };
+
+      const handleResetAll = () => {
+        setStudents(INITIAL_STUDENTS);
+        setTasks(INITIAL_TASKS);
+        setSubmissions([]);
+        setPassword('admin');
+        showToast('すべてのデータを初期化しました');
+        setView('home');
+      };
+
+      return (
+        <div className="w-full h-full font-sans">
+          {view === 'home' && <HomeView onSelect={setView} />}
+          {view === 'student' && !selectedStudent && <StudentScanner students={students} onScan={setSelectedStudent} onBack={() => setView('home')} />}
+          {view === 'student' && selectedStudent && <SubmissionForm student={selectedStudent} tasks={tasks} submissions={submissions} onSubmit={handleSubmission} onCancel={() => setSelectedStudent(null)} />}
+          {view === 'teacher' && <TeacherDashboard students={students} tasks={tasks} submissions={submissions} password={password} setTasks={setTasks} setStudents={setStudents} setSubmissions={setSubmissions} setPassword={setPassword} onResetAll={handleResetAll} onBack={() => setView('home')} />}
+        </div>
+      );
+    };
+
+    const App = () => (
+      <UIProvider>
+        <AppContent />
+      </UIProvider>
+    );
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>

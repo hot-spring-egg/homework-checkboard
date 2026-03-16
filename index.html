@@ -283,26 +283,28 @@
 
     // --- QRコードコンポーネント ---
     const QRCodeImage = ({ text }) => {
-      const [svg, setSvg] = useState('');
+      const [src, setSrc] = useState('');
       useEffect(() => {
         if (!window.QRCode) return;
-        // 印刷時に確実に表示させるため、画像(Data URL)ではなくSVG要素として直接描画する
-        window.QRCode.toString(text, { 
-          type: 'svg',
+        // 色指定の互換性エラーを防ぐため、デフォルト（黒）で確実に画像(Data URL)を生成
+        window.QRCode.toDataURL(text, { 
+          width: 120, 
           margin: 1, 
-          color: { dark: '#2C3E50', light: '#FFFFFF' }, 
           errorCorrectionLevel: 'M' 
-        }, (err, string) => {
-          if (!err) setSvg(string);
+        }, (err, url) => {
+          if (!err) {
+            setSrc(url);
+          } else {
+            console.error("QR Code generation error:", err);
+          }
         });
       }, [text]);
       
-      return svg ? (
-        <div 
-          className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full" 
-          dangerouslySetInnerHTML={{ __html: svg }} 
-        />
-      ) : null;
+      return src ? (
+        <img src={src} alt="QR Code" className="w-full h-full object-contain" />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center text-[10px] text-gray-300 font-bold">読込中</div>
+      );
     };
 
     // --- 印刷用画面コンポーネント ---

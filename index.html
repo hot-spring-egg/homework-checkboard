@@ -340,7 +340,7 @@
             </div>
             
             <div className="grid grid-cols-2 gap-y-[10mm] gap-x-[5mm] justify-items-center" style={{ gridTemplateColumns: 'repeat(2, 90mm)' }}>
-              {students.sort((a,b) => a.number - b.number).map(student => (
+              {students.map(student => (
                 <div key={student.id} className="w-[90mm] h-[55mm] border border-dashed border-gray-400 p-[2mm]" style={{ pageBreakInside: 'avoid', breakInside: 'avoid' }}>
                   <div className="w-full h-full bg-app-cream rounded-xl border-2 border-app-sage/30 flex items-center justify-between p-4 overflow-hidden relative">
                     {/* 背景装飾 */}
@@ -655,7 +655,7 @@
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {students.sort((a,b)=>a.number - b.number).map(student => {
+                  {students.map(student => {
                     const sub = todaySubmissions.find(s => s.studentId === student.id);
                     const expectedTasks = TaskUtils.getExpectedTasks(student.id, tasks, submissions, todayStr);
                     const isAllSubmitted = expectedTasks.length === 0 || (sub && expectedTasks.every(t => sub.items && sub.items[t.id]));
@@ -698,7 +698,7 @@
 
       const monthSubmissions = submissions.filter(s => s.date.startsWith(selectedMonth));
       const datesInMonth = Array.from(new Set(monthSubmissions.map(s => s.date))).sort();
-      const filteredStudents = selectedStudentId === 'all' ? students.sort((a,b)=>a.number - b.number) : students.filter(s => s.id === selectedStudentId);
+      const filteredStudents = selectedStudentId === 'all' ? students : students.filter(s => s.id === selectedStudentId);
 
       return (
         <div className="space-y-6 animate-fade-in">
@@ -707,7 +707,7 @@
             <div className="flex gap-3 w-full sm:w-auto">
               <select value={selectedStudentId} onChange={e => setSelectedStudentId(e.target.value)} className="flex-1 border-2 border-gray-200 p-2.5 rounded-xl font-bold text-app-navy outline-none focus:border-app-sage bg-gray-50">
                 <option value="all">全員を表示</option>
-                {students.sort((a,b)=>a.number - b.number).map(s => <option key={s.id} value={s.id}>{s.number}. {s.name}</option>)}
+                {students.map(s => <option key={s.id} value={s.id}>{s.number}. {s.name}</option>)}
               </select>
               <select value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} className="flex-1 border-2 border-gray-200 p-2.5 rounded-xl font-bold text-app-navy outline-none focus:border-app-sage bg-gray-50">
                 {availableMonths.length === 0 && <option value={selectedMonth}>{selectedMonth.replace('-','年')}月</option>}
@@ -1020,14 +1020,32 @@
     const StudentsTab = ({ students, setStudents, onPrintClick }) => {
       const { showConfirm, showToast } = useUI();
       const [form, setForm] = useState({ number: '', name: '' });
+      const [editingStudent, setEditingStudent] = useState(null);
       
       const handleAdd = (e) => {
         e.preventDefault();
         if(!form.name.trim() || !form.number) return showToast('番号と名前を入力してください', 'error');
         const newStudent = { id: 's' + Date.now(), number: parseInt(form.number), name: form.name, barcode: '1' + String(form.number).padStart(3, '0') };
-        setStudents([...students, newStudent].sort((a,b) => a.number - b.number));
+        // 追加時に自動ソートせず、最後尾に追加する
+        setStudents([...students, newStudent]);
         setForm({ number: '', name: '' });
         showToast('名簿に追加しました');
+      };
+
+      const handleUpdate = (e) => {
+        e.preventDefault();
+        if(!editingStudent.name.trim() || !editingStudent.number) return showToast('番号と名前を入力してください', 'error');
+        
+        const updatedStudent = {
+          ...editingStudent,
+          number: parseInt(editingStudent.number),
+          // 番号が変わった場合に備え、バーコードを再生成する
+          barcode: '1' + String(editingStudent.number).padStart(3, '0')
+        };
+        
+        setStudents(students.map(s => s.id === updatedStudent.id ? updatedStudent : s));
+        setEditingStudent(null);
+        showToast('児童情報を更新しました');
       };
       
       const handleDelete = (id) => {
@@ -1037,8 +1055,49 @@
         }, '削除する', true);
       };
 
+      const moveUp = (index) => {
+        if(index === 0) return;
+        const newStudents = [...students];
+        [newStudents[index - 1], newStudents[index]] = [newStudents[index], newStudents[index - 1]];
+        setStudents(newStudents);
+      };
+
+      const moveDown = (index) => {
+        if(index === students.length - 1) return;
+        const newStudents = [...students];
+        [newStudents[index + 1], newStudents[index]] = [newStudents[index], newStudents[index + 1]];
+        setStudents(newStudents);
+      };
+
       return (
         <div className="space-y-6 animate-fade-in">
+          {/* 編集モーダル */}
+          {editingStudent && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black bg-opacity-40 backdrop-blur-sm animate-fade-in">
+              <div className="bg-white rounded-3xl p-8 w-full max-w-md shadow-2xl animate-slide-up">
+                <h3 className="text-2xl font-bold mb-6 text-app-navy flex items-center">
+                  <svg className="w-7 h-7 mr-2" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                  児童の編集
+                </h3>
+                <form onSubmit={handleUpdate} className="space-y-5">
+                  <div className="flex flex-col gap-2">
+                    <label className="text-sm font-bold text-gray-500">出席番号</label>
+                    <input type="number" value={editingStudent.number} onChange={e => setEditingStudent({...editingStudent, number: e.target.value})} className="border-2 border-gray-200 p-3 rounded-xl focus:border-app-sage outline-none font-bold text-app-navy" />
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <label className="text-sm font-bold text-gray-500">名前</label>
+                    <input type="text" value={editingStudent.name} onChange={e => setEditingStudent({...editingStudent, name: e.target.value})} className="border-2 border-gray-200 p-3 rounded-xl focus:border-app-sage outline-none font-bold text-app-navy" />
+                  </div>
+                  <p className="text-xs text-gray-400 mt-2 font-bold">※出席番号を変更すると、QRコードも新しくなります。過去の提出記録はそのまま引き継がれます。</p>
+                  <div className="flex space-x-4 pt-4 mt-4 border-t border-gray-100">
+                    <button type="button" onClick={() => setEditingStudent(null)} className="flex-1 py-4 rounded-xl font-bold text-gray-500 bg-gray-100 hover:bg-gray-200 transition-colors">キャンセル</button>
+                    <button type="submit" className="flex-1 py-4 rounded-xl font-bold text-white bg-app-sage hover:bg-app-sageDark transition-colors shadow-[0_4px_0_#62807F] active:shadow-none active:translate-y-1">保存する</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
           <form onSubmit={handleAdd} className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col sm:flex-row gap-3 items-end">
             <div className="w-full sm:w-24">
               <label className="block text-xs font-bold text-gray-500 mb-1">出席番号</label>
@@ -1065,15 +1124,26 @@
                 <tr><th className="p-4 w-20">番号</th><th className="p-4">名前</th><th className="p-4 text-xs">バーコード値</th><th className="p-4"></th></tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {students.map(s => (
+                {students.map((s, index) => (
                   <tr key={s.id} className="hover:bg-gray-50 transition-colors">
                     <td className="p-4 text-gray-400 font-mono">{s.number}</td>
                     <td className="p-4 font-bold text-app-navy">{s.name}</td>
                     <td className="p-4 font-mono text-gray-400 text-sm">{s.barcode}</td>
                     <td className="p-4 text-right">
-                      <button onClick={() => handleDelete(s.id)} className="text-gray-400 hover:text-app-terracotta p-2 rounded-lg hover:bg-red-50 transition-colors">
-                        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                      </button>
+                      <div className="flex items-center justify-end space-x-1">
+                        <button type="button" onClick={() => moveUp(index)} disabled={index === 0} className="p-2 text-gray-400 hover:text-app-navy disabled:opacity-30 transition-colors" title="上へ移動">
+                          <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7"/></svg>
+                        </button>
+                        <button type="button" onClick={() => moveDown(index)} disabled={index === students.length - 1} className="p-2 text-gray-400 hover:text-app-navy disabled:opacity-30 transition-colors" title="下へ移動">
+                          <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                        </button>
+                        <button type="button" onClick={() => setEditingStudent(s)} className="p-2 text-gray-400 hover:text-app-blue hover:bg-blue-50 rounded-lg transition-colors" title="編集">
+                          <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                        </button>
+                        <button type="button" onClick={() => handleDelete(s.id)} className="p-2 text-gray-400 hover:text-app-terracotta hover:bg-red-50 rounded-lg transition-colors" title="削除">
+                          <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}

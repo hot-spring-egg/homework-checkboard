@@ -111,7 +111,7 @@
         print-color-adjust: exact; 
       }
       .no-print { display: none !important; }
-      @page { margin: 10mm; size: A4; }
+      @page { margin: 5mm; size: A4; }
     }
   </style>
 </head>
@@ -329,8 +329,8 @@
             </button>
           </div>
 
-          <div className="p-8 mx-auto w-full max-w-[210mm] bg-white">
-            <div className="no-print mb-8 p-5 bg-app-cream text-app-navy text-sm font-bold rounded-2xl border-2 border-app-sage/20 shadow-sm flex items-start">
+          <div className="p-8 print:p-0 mx-auto w-full max-w-[210mm] bg-white flex flex-col items-center">
+            <div className="no-print mb-8 w-full p-5 bg-app-cream text-app-navy text-sm font-bold rounded-2xl border-2 border-app-sage/20 shadow-sm flex items-start">
               <span className="text-2xl mr-3">💡</span>
               <p className="leading-relaxed">
                 A4用紙で印刷してください。<br/>
@@ -339,9 +339,9 @@
               </p>
             </div>
             
-            <div className="grid grid-cols-2 gap-y-[10mm] gap-x-[5mm] justify-items-center" style={{ gridTemplateColumns: 'repeat(2, 90mm)' }}>
+            <div className="flex flex-wrap justify-center gap-y-[8mm] gap-x-[8mm] max-w-[190mm] mx-auto">
               {students.map(student => (
-                <div key={student.id} className="w-[90mm] h-[55mm] border border-dashed border-gray-400 p-[2mm]" style={{ pageBreakInside: 'avoid', breakInside: 'avoid' }}>
+                <div key={student.id} className="w-[90mm] h-[55mm] shrink-0 border border-dashed border-gray-400 p-[2mm]" style={{ pageBreakInside: 'avoid', breakInside: 'avoid' }}>
                   <div className="w-full h-full bg-app-cream rounded-xl border-2 border-app-sage/30 flex items-center justify-between p-4 overflow-hidden relative">
                     {/* 背景装飾 */}
                     <div className="absolute top-0 right-0 w-16 h-16 bg-app-sage/15 rounded-bl-full"></div>

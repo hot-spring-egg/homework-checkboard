@@ -111,8 +111,8 @@
         print-color-adjust: exact; 
       }
       .no-print { display: none !important; }
-      /* 上部に15mmの余白、左右は5mm、下部は10mmに設定 */
-      @page { margin: 15mm 5mm 10mm 5mm; size: A4; }
+      /* 上部に10mmの余白、左右は5mm、下部は10mmに設定 */
+      @page { margin: 10mm 5mm 10mm 5mm; size: A4; }
     }
   </style>
 </head>
@@ -671,7 +671,7 @@
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {students.map(student => {
+                  {students.sort((a,b)=>a.number - b.number).map(student => {
                     const sub = todaySubmissions.find(s => s.studentId === student.id);
                     const expectedTasks = TaskUtils.getExpectedTasks(student.id, tasks, submissions, todayStr);
                     const isAllSubmitted = expectedTasks.length === 0 || (sub && expectedTasks.every(t => sub.items && sub.items[t.id]));
